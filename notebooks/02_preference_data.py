@@ -26,6 +26,16 @@
 import os
 from pathlib import Path
 
+# Load env variables from .env file if it exists
+env_path = Path.cwd().parent / ".env" if Path.cwd().name == "notebooks" else Path.cwd() / ".env"
+if env_path.exists():
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, val = line.split("=", 1)
+                os.environ[key.strip()] = val.strip()
+
 COMPUTE_TIER = os.environ.get("COMPUTE_TIER", "T4").upper()
 
 if COMPUTE_TIER == "T4":
@@ -78,7 +88,7 @@ print(f"Tokenizer: {tokenizer.__class__.__name__}  vocab={tokenizer.vocab_size:,
 # %%
 from datasets import load_dataset
 
-ds = load_dataset(PREF_DATASET, split=f"train[:{PREF_SLICE}]")
+ds = load_dataset(PREF_DATASET, split=f"train[:{PREF_SLICE}]", token=os.environ.get("HF_TOKEN"))
 print(f"Loaded {len(ds)} pairs. Columns: {ds.column_names}")
 
 # %% [markdown]

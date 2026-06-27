@@ -20,7 +20,18 @@
 # %%
 import os
 import json
+import re
 from pathlib import Path
+
+# Load env variables from .env file if it exists
+env_path = Path.cwd().parent / ".env" if Path.cwd().name == "notebooks" else Path.cwd() / ".env"
+if env_path.exists():
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, val = line.split("=", 1)
+                os.environ[key.strip()] = val.strip()
 
 COMPUTE_TIER = os.environ.get("COMPUTE_TIER", "T4").upper()
 
@@ -79,6 +90,16 @@ def generate_with_adapter(adapter_path: Path, prompts: list[dict], max_new_token
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    if tokenizer.chat_template is None:
+        tokenizer.chat_template = (
+            "{% for message in messages %}"
+            "{{'<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n'}}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}"
+            "{{'<|im_start|>assistant\\n'}}"
+            "{% endif %}"
+        )
 
     model = PeftModel.from_pretrained(model, str(adapter_path))
     FastLanguageModel.for_inference(model)
@@ -232,22 +253,46 @@ def judge_with_openai(rows):
         from openai import OpenAI
     except ImportError:
         return None
-    client = OpenAI()
+    
+    # Read custom API key and base URL from env if using OpenRouter
+    api_key = os.environ.get("OPENAI_API_KEY")
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    
     results = []
     for p, sft, dpo in zip(EVAL_PROMPTS, sft_outputs, dpo_outputs):
         msg = JUDGE_PROMPT_TEMPLATE.format(
             prompt=p["prompt"], category=p["category"], sft=sft, dpo=dpo
         )
-        resp = client.chat.completions.create(
-            model=os.environ.get("JUDGE_MODEL", "gpt-4o-mini"),
-            messages=[{"role": "user", "content": msg}],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
+        
+        # OpenRouter or other API providers might not support response_format
         try:
-            parsed = json.loads(resp.choices[0].message.content)
+            resp = client.chat.completions.create(
+                model=os.environ.get("JUDGE_MODEL", "gpt-4o-mini"),
+                messages=[{"role": "user", "content": msg}],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+        except Exception:
+            resp = client.chat.completions.create(
+                model=os.environ.get("JUDGE_MODEL", "gpt-4o-mini"),
+                messages=[{"role": "user", "content": msg}],
+                temperature=0,
+            )
+            
+        content = resp.choices[0].message.content
+        try:
+            parsed = json.loads(content)
         except json.JSONDecodeError:
-            parsed = {"winner": "tie", "justification": resp.choices[0].message.content[:200]}
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    parsed = {"winner": "tie", "justification": content[:200]}
+            else:
+                parsed = {"winner": "tie", "justification": content[:200]}
+                
         parsed["id"] = p["id"]
         parsed["category"] = p["category"]
         results.append(parsed)

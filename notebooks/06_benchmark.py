@@ -29,7 +29,18 @@
 import os
 import json
 import gc
+import re
 from pathlib import Path
+
+# Load env variables from .env file if it exists
+env_path = Path.cwd().parent / ".env" if Path.cwd().name == "notebooks" else Path.cwd() / ".env"
+if env_path.exists():
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, val = line.split("=", 1)
+                os.environ[key.strip()] = val.strip()
 
 COMPUTE_TIER = os.environ.get("COMPUTE_TIER", "T4").upper()
 
@@ -196,6 +207,16 @@ def generate_with_adapter(adapter_path, prompts, max_new_tokens=256):
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    if tokenizer.chat_template is None:
+        tokenizer.chat_template = (
+            "{% for message in messages %}"
+            "{{'<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n'}}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}"
+            "{{'<|im_start|>assistant\\n'}}"
+            "{% endif %}"
+        )
     model = PeftModel.from_pretrained(model, str(adapter_path))
     FastLanguageModel.for_inference(model)
 
@@ -233,16 +254,34 @@ Output JSON: {{"winner": "A" | "B" | "tie", "reason": "..."}}"""
 def judge_pair(a, b, prompt):
     if os.environ.get("OPENAI_API_KEY"):
         from openai import OpenAI
-        client = OpenAI()
-        resp = client.chat.completions.create(
-            model=os.environ.get("JUDGE_MODEL", "gpt-4o-mini"),
-            messages=[{"role": "user", "content": JUDGE_PROMPT.format(prompt=prompt, a=a, b=b)}],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
+        api_key = os.environ.get("OPENAI_API_KEY")
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        
         try:
-            return json.loads(resp.choices[0].message.content)
+            resp = client.chat.completions.create(
+                model=os.environ.get("JUDGE_MODEL", "gpt-4o-mini"),
+                messages=[{"role": "user", "content": JUDGE_PROMPT.format(prompt=prompt, a=a, b=b)}],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
         except Exception:
+            resp = client.chat.completions.create(
+                model=os.environ.get("JUDGE_MODEL", "gpt-4o-mini"),
+                messages=[{"role": "user", "content": JUDGE_PROMPT.format(prompt=prompt, a=a, b=b)}],
+                temperature=0,
+            )
+            
+        content = resp.choices[0].message.content
+        try:
+            return json.loads(content)
+        except Exception:
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except Exception:
+                    pass
             return {"winner": "tie", "reason": "parse error"}
     elif os.environ.get("ANTHROPIC_API_KEY"):
         from anthropic import Anthropic

@@ -25,6 +25,16 @@
 import os
 from pathlib import Path
 
+# Load env variables from .env file if it exists
+env_path = Path.cwd().parent / ".env" if Path.cwd().name == "notebooks" else Path.cwd() / ".env"
+if env_path.exists():
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, val = line.split("=", 1)
+                os.environ[key.strip()] = val.strip()
+
 # Tier detection. Defaults to T4 if env not set.
 COMPUTE_TIER = os.environ.get("COMPUTE_TIER", "T4").upper()
 assert COMPUTE_TIER in ("T4", "BIGGPU"), f"Invalid COMPUTE_TIER: {COMPUTE_TIER}"
@@ -85,6 +95,18 @@ if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
     print("Set tokenizer.pad_token = eos_token")
 
+# Fallback in case tokenizer doesn't have a chat template (e.g. local mirror or old version)
+if tokenizer.chat_template is None:
+    tokenizer.chat_template = (
+        "{% for message in messages %}"
+        "{{'<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n'}}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}"
+        "{{'<|im_start|>assistant\\n'}}"
+        "{% endif %}"
+    )
+    print("Set tokenizer.chat_template = ChatML fallback")
+
 # %%
 model = FastLanguageModel.get_peft_model(
     model,
@@ -112,7 +134,7 @@ print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requir
 # %%
 from datasets import load_dataset
 
-ds = load_dataset(SFT_DATASET, split=f"train[:{SFT_SLICE}]")
+ds = load_dataset(SFT_DATASET, split=f"train[:{SFT_SLICE}]", token=os.environ.get("HF_TOKEN"))
 print(f"Loaded {len(ds)} rows. Columns: {ds.column_names}")
 print(f"\nFirst row:\n{ds[0]}")
 
